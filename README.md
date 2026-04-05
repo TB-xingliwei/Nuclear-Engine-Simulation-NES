@@ -1,1 +1,806 @@
 Nuclear-Engine-Simulation-NES
+cd /home/tb-xingliwei/nuclear-engine-core
+
+echo "========== calculix.py ==========" && cat calculix.py && \
+echo "" && echo "========== openfoam_final.py ==========" && cat openfoam_final.py && \
+echo "" && echo "========== openmc_final.py ==========" && cat openmc_final.py && \
+echo "" && echo "========== config_unified.xml ==========" && cat config_unified.xml && \
+echo "" && echo "========== config_3way.xml ==========" && cat config_3way.xml && \
+echo "" && echo "========== geometry.xml ==========" && cat geometry.xml && \
+echo "" && echo "========== materials.xml ==========" && cat materials.xml && \
+echo "" && echo "========== settings.xml ==========" && cat settings.xml && \
+echo "" && echo "========== tallies.xml ==========" && cat tallies.xml && \
+echo "" && echo "========== validation_env/version_info.txt ==========" && cat validation_env/version_info.txt && \
+echo "" && echo "========== validation_env/RESULTS.md ==========" && cat validation_env/RESULTS.md
+
+
+
+
+
+
+
+cd /home/tb-xingliwei/nuclear-engine-core
+
+echo "========== calculix.py ==========" && cat calculix.py && \
+echo "" && echo "========== openfoam_final.py ==========" && cat openfoam_final.py && \
+echo "" && echo "========== openmc_final.py ==========" && cat openmc_final.py && \
+echo "" && echo "========== config_unified.xml ==========" && cat config_unified.xml && \
+echo "" && echo "========== config_3way.xml ==========" && cat config_3way.xml && \
+echo "" && echo "========== geometry.xml ==========" && cat geometry.xml && \
+echo "" && echo "========== materials.xml ==========" && cat materials.xml && \
+echo "" && echo "========== settings.xml ==========" && cat settings.xml && \
+echo "" && echo "========== tallies.xml ==========" && cat tallies.xml && \
+echo "" && echo "========== validation_env/version_info.txt ==========" && cat validation_env/version_info.txt && \
+echo "" && echo "========== validation_env/RESULTS.md ==========" && cat validation_env/RESULTS.md
+
+
+========== calculix.py ==========
+#!/usr/bin/env python3
+import numpy as np
+import precice
+
+print("[CalculiX] 启动...")
+
+SIZE = 310  # 必须与 OpenMC/OpenFOAM 一致
+n = SIZE**3
+print(f"CalculiX: {n:,} 点")
+
+p = precice.Participant("CalculiX", "config_unified.xml", 0, 1)
+mesh = "MeshOne"
+
+precice_dt = p.initialize()
+dt = precice_dt if precice_dt is not None else 0.01
+print(f"dt={dt}")
+
+step = 0
+while p.is_coupling_ongoing() and step < 3:
+    step += 1
+    
+    # 读取温度（完整网格）
+    temp = p.read_data(mesh, "Temperature", list(range(n)), 0)
+    
+    # 计算位移（简化：温度升高 → 热膨胀）
+    alpha = 1.2e-5  # 热膨胀系数
+    T_ref = 300.0
+    disp_magnitude = alpha * (temp - T_ref)
+    
+    print(f"步 {step}: T_avg={temp.mean():.1f}K, max_disp={disp_magnitude.max():.2e}m")
+    
+    # 写入位移（3 分量）
+    displacement = np.zeros((n, 3), dtype=np.float32)
+    displacement[:, 0] = disp_magnitude  # x 方向位移
+    p.write_data(mesh, "Displacement", list(range(n)), displacement.flatten())
+    
+    dt = p.advance(dt)
+    if dt is None:
+        dt = 0.01
+
+p.finalize()
+print("[CalculiX] 完成")
+
+========== openfoam_final.py ==========
+#!/usr/bin/env python3
+import numpy as np
+import precice
+import time
+
+print("[OpenFOAM] 500³ 优化版启动...")
+
+SIZE = 400
+n = SIZE**3
+print(f"OpenFOAM: {n:,} 点")
+
+p = precice.Participant("OpenFOAM", "config_unified.xml", 0, 1)
+mesh = "MeshOne"
+
+# OpenFOAM 是接收网格的一方，需要设置访问区域
+bounds = [0.0, 1.0, -0.5, 0.5, 0.0, 1.0]
+p.set_mesh_access_region(mesh, bounds)
+print(f"设置网格访问区域: {bounds}")
+
+precice_dt = p.initialize()
+dt = precice_dt if precice_dt is not None else 0.01
+print(f"dt={dt}")
+
+temp = np.ones(n, dtype=np.float32) * 300.0
+step = 0
+
+while p.is_coupling_ongoing() and step < 5:
+    if p.requires_writing_checkpoint():
+        print("  [OpenFOAM] 写入检查点")
+    
+    step += 1
+    step_start = time.time()
+    
+    power = p.read_data(mesh, "Power", list(range(n)), 0)
+    print(f"步 {step}: P={power.mean():.2e}")
+    p.write_data(mesh, "Temperature", list(range(n)), temp)
+    
+    if p.requires_reading_checkpoint():
+        print("  [OpenFOAM] 读取检查点")
+    
+    dt = p.advance(dt)
+    if dt is None:
+        dt = 0.01
+
+p.finalize()
+print("OpenFOAM 完成")
+
+========== openmc_final.py ==========
+#!/usr/bin/env python3
+import numpy as np
+import precice
+import time
+
+print("[OpenMC] 500³ 优化版启动...")
+
+SIZE = 400
+n = SIZE**3
+print(f"OpenMC: {n:,} 点")
+
+p = precice.Participant("OpenMC", "config_unified.xml", 0, 1)
+mesh = "MeshOne"
+
+print("生成网格...")
+x = np.linspace(0, 1, SIZE, dtype=np.float32)
+y = np.linspace(-0.5, 0.5, SIZE, dtype=np.float32)
+z = np.linspace(0, 1, SIZE, dtype=np.float32)
+xv, yv, zv = np.meshgrid(x, y, z, indexing='ij')
+vertices = np.column_stack([xv.ravel(), yv.ravel(), zv.ravel()]).astype(np.float32)
+del xv, yv, zv
+
+p.set_mesh_vertices(mesh, vertices)
+print(f"顶点: {vertices.nbytes/1e6:.1f} MB")
+del vertices
+
+# OpenMC 是提供网格的一方，不需要 set_mesh_access_region！
+
+precice_dt = p.initialize()
+dt = precice_dt if precice_dt is not None else 0.01
+print(f"dt={dt}")
+
+step = 0
+while p.is_coupling_ongoing() and step < 5:
+    if p.requires_writing_checkpoint():
+        print("  [OpenMC] 写入检查点")
+    
+    step += 1
+    
+    temp = p.read_data(mesh, "Temperature", list(range(n)), 0)
+    if temp.mean() < 10:
+        temp = np.ones(n, dtype=np.float32) * 300.0
+    
+    power = np.ones(n, dtype=np.float32) * 1000.0
+    
+    print(f"步 {step}: T={temp.mean():.1f}K")
+    p.write_data(mesh, "Power", list(range(n)), power)
+    
+    if p.requires_reading_checkpoint():
+        print("  [OpenMC] 读取检查点")
+    
+    dt = p.advance(dt)
+    if dt is None:
+        dt = 0.01
+
+p.finalize()
+print("OpenMC 完成")
+
+# 在 p.finalize() 之前添加
+import numpy as np
+np.save('temp_field.npy', temp)
+np.save('power_field.npy', power)
+print("温度场和功率场已保存")
+
+========== config_unified.xml ==========
+<?xml version="1.0" encoding="UTF-8" ?>
+<precice-configuration>
+    <log>
+        <sink type="stream" output="stdout" filter="%Severity% > debug" />
+    </log>
+
+    <data:scalar name="Temperature"/>
+    <data:scalar name="Power"/>
+
+    <mesh name="MeshOne" dimensions="3">
+        <use-data name="Temperature"/>
+        <use-data name="Power"/>
+    </mesh>
+
+    <participant name="OpenMC">
+        <provide-mesh name="MeshOne"/>
+        <write-data name="Power" mesh="MeshOne"/>
+        <read-data name="Temperature" mesh="MeshOne"/>
+    </participant>
+
+    <participant name="OpenFOAM">
+        <receive-mesh name="MeshOne" from="OpenMC" api-access="true"/>
+        <write-data name="Temperature" mesh="MeshOne"/>
+        <read-data name="Power" mesh="MeshOne"/>
+    </participant>
+
+    <m2n:sockets acceptor="OpenMC" connector="OpenFOAM" enforce-gather-scatter="true"/>
+
+    <coupling-scheme:serial-implicit>
+        <participants first="OpenMC" second="OpenFOAM"/>
+        <max-time value="1.0"/>
+        <time-window-size value="0.01"/>
+        <max-iterations value="10"/>
+        <relative-convergence-measure limit="1e-6" data="Power" mesh="MeshOne"/>
+        
+        <exchange data="Power" mesh="MeshOne" from="OpenMC" to="OpenFOAM"/>
+        <exchange data="Temperature" mesh="MeshOne" from="OpenFOAM" to="OpenMC"/>
+    </coupling-scheme:serial-implicit>
+
+</precice-configuration>
+
+========== config_3way.xml ==========
+<?xml version="1.0" encoding="UTF-8" ?>
+<precice-configuration>
+    <log>
+        <sink type="stream" output="stdout" filter="%Severity% > debug" />
+    </log>
+
+    <data:scalar name="Temperature"/>
+    <data:scalar name="Power"/>
+    <data:scalar name="Stress"/>
+
+    <mesh name="MeshOne" dimensions="3">
+        <use-data name="Temperature"/>
+        <use-data name="Power"/>
+        <use-data name="Stress"/>
+    </mesh>
+
+    <participant name="OpenMC">
+        <provide-mesh name="MeshOne"/>
+        <write-data name="Power" mesh="MeshOne"/>
+        <read-data name="Temperature" mesh="MeshOne"/>
+    </participant>
+
+    <participant name="OpenFOAM">
+        <provide-mesh name="MeshOne"/>
+        <write-data name="Temperature" mesh="MeshOne"/>
+        <read-data name="Power" mesh="MeshOne"/>
+        <read-data name="Stress" mesh="MeshOne"/>
+    </participant>
+
+    <participant name="CalculiX">
+        <provide-mesh name="MeshOne"/>
+        <write-data name="Stress" mesh="MeshOne"/>
+        <read-data name="Temperature" mesh="MeshOne"/>
+    </participant>
+
+    <m2n:sockets acceptor="OpenMC" connector="OpenFOAM"/>
+    <m2n:sockets acceptor="OpenFOAM" connector="CalculiX"/>
+
+    <coupling-scheme:serial-implicit>
+        <participants first="OpenMC" second="OpenFOAM"/>
+        <max-time value="1.0"/>
+        <time-window-size value="0.01"/>
+        <max-iterations value="10"/>
+        <relative-convergence-measure limit="1e-6" data="Power" mesh="MeshOne"/>
+        
+        <exchange data="Power" mesh="MeshOne" from="OpenMC" to="OpenFOAM"/>
+        <exchange data="Temperature" mesh="MeshOne" from="OpenFOAM" to="OpenMC"/>
+        <exchange data="Temperature" mesh="MeshOne" from="OpenFOAM" to="CalculiX"/>
+        <exchange data="Stress" mesh="MeshOne" from="CalculiX" to="OpenFOAM"/>
+    </coupling-scheme:serial-implicit>
+
+</precice-configuration>
+
+========== geometry.xml ==========
+<?xml version='1.0' encoding='UTF-8'?>
+<geometry>
+  <cell id="1" material="1" region="-1 4 -5" universe="1"/>
+  <cell id="2" material="void" region="1 -2 4 -5" universe="1"/>
+  <cell id="3" material="2" region="2 -3 4 -5" universe="1"/>
+  <cell id="4" material="3" region="3 4 -5" universe="1"/>
+  <surface id="1" type="z-cylinder" coeffs="0.0 0.0 1.0"/>
+  <surface id="2" type="z-cylinder" coeffs="0.0 0.0 1.05"/>
+  <surface id="3" type="z-cylinder" coeffs="0.0 0.0 15.0"/>
+  <surface id="4" type="z-plane" boundary="reflective" coeffs="0"/>
+  <surface id="5" type="z-plane" boundary="reflective" coeffs="100.0"/>
+</geometry>
+
+========== materials.xml ==========
+<?xml version='1.0' encoding='utf-8'?>
+<materials>
+  <material id="1" name="UC" depletable="true" temperature="1200.0">
+    <density value="13.6" units="g/cm3"/>
+    <nuclide name="U235" ao="0.93"/>
+    <nuclide name="U238" ao="0.07"/>
+    <nuclide name="C12" ao="0.988922"/>
+    <nuclide name="C13" ao="0.011078"/>
+  </material>
+  <material id="2" name="H2">
+    <density value="70.0" units="kg/m3"/>
+    <nuclide name="H1" ao="2.0"/>
+  </material>
+  <material id="3" name="BeO">
+    <density value="3.01" units="g/cm3"/>
+    <nuclide name="Be9" ao="1.0"/>
+    <nuclide name="O16" ao="0.9976206"/>
+    <nuclide name="O17" ao="0.000379"/>
+    <nuclide name="O18" ao="0.0020004"/>
+  </material>
+</materials>
+
+========== settings.xml ==========
+<?xml version='1.0' encoding='UTF-8'?>
+<settings>
+  <run_mode>eigenvalue</run_mode>
+  <particles>100000</particles>
+  <batches>30</batches>
+  <inactive>10</inactive>
+  <source type="independent" strength="1.0" particle="neutron">
+    <space type="box">
+      <parameters>-1.0 -1.0 0 1.0 1.0 100.0</parameters>
+    </space>
+  </source>
+  <temperature_method>interpolation</temperature_method>
+  <temperature_range>294 2500</temperature_range>
+</settings>
+
+========== tallies.xml ==========
+<?xml version='1.0' encoding='UTF-8'?>
+<tallies>
+  <mesh id="1">
+    <dimension>1 1 20</dimension>
+    <lower_left>-15.0 -15.0 0</lower_left>
+    <upper_right>15.0 15.0 100.0</upper_right>
+  </mesh>
+  <filter id="1" type="mesh">
+    <bins>1</bins>
+  </filter>
+  <tally id="1" name="axial_power">
+    <filters>1</filters>
+    <scores>heating</scores>
+  </tally>
+</tallies>
+
+========== validation_env/version_info.txt ==========
+========================================
+验证环境版本信息
+========================================
+日期: Fri Apr  3 19:26:46 CST 2026
+系统: Ubuntu 25.10
+内核: 6.17.0-19-generic
+
+preCICE 版本:
+3.4.0;no-info [git failed to run];PRECICE_FEATURE_MPI_COMMUNICATION=Y;PRECICE_FEATURE_PETSC_MAPPING=Y;PRECICE_FEATURE_GINKGO_MAPPING=N;PRECICE_FEATURE_PYTHON_ACTIONS=Y;PRECICE_BINDINGS_C=Y;PRECICE_BINDINGS_FORTRAN=Y;CXX=GNU;CXXFLAGS= -O3 -DNDEBUG;LDFLAGS=
+
+Python 版本:
+Python 3.13.7
+
+OpenFOAM: 12
+OpenMC: 0.15.3
+
+成功运行的规模:
+- 300³ (27M 点) ✅
+- 350³ (43M 点) ✅
+- 380³ (55M 点) ✅
+- 390³ (60M 点) ✅
+- 400³ (64M 点) ✅
+
+稳定上限: 400³ (约 6400 万点)
+
+硬件: HP 战 99, 32GB 内存
+========================================
+
+========== validation_env/RESULTS.md ==========
+# 核发动机多物理场耦合验证结果
+
+## 成功运行的规模
+| 规模 | 点数 | 状态 |
+|------|------|------|
+| 300³ | 27M | ✅ 成功 |
+| 350³ | 43M | ✅ 成功 |
+| 380³ | 55M | ✅ 成功 |
+| 390³ | 60M | ✅ 成功 |
+| 400³ | 64M | ✅ 成功 |
+
+## 稳定上限
+**400³ (约 6400 万点)**
+
+## 硬件配置
+- 型号: HP 战 99
+- 内存: 32GB
+- 系统: Ubuntu 25.10
+
+## 软件版本
+- preCICE: 3.4.0
+- OpenFOAM: 12
+- Python: 3.13
+
+## 结论
+32GB 原始配置完全满足两场耦合方法验证需求，无需升级。
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ 
+
+
+
+
+
+
+
+
+
+cd /home/tb-xingliwei/nuclear-engine-core
+
+echo "========== 1. openmc.log 完整日志 =========="
+cat openmc.log
+
+echo ""
+echo "========== 2. precice-OpenFOAM-convergence.log =========="
+cat precice-OpenFOAM-convergence.log
+
+echo ""
+echo "========== 3. precice-OpenFOAM-iterations.log =========="
+cat precice-OpenFOAM-iterations.log
+
+echo ""
+echo "========== 4. precice-OpenMC-iterations.log =========="
+cat precice-OpenMC-iterations.log
+
+echo ""
+echo "========== 5. validation_env/openmc.log =========="
+cat validation_env/openmc.log
+
+echo ""
+echo "========== 6. validation_env/openfoam.log =========="
+cat validation_env/openfoam.log
+
+
+
+
+
+
+
+
+
+
+
+
+
+ cd /home/tb-xingliwei/nuclear-engine-core
+
+echo "========== 1. openmc.log 完整日志 =========="
+cat openmc.log
+
+echo ""
+echo "========== 2. precice-OpenFOAM-convergence.log =========="
+cat precice-OpenFOAM-convergence.log
+
+echo ""
+echo "========== 3. precice-OpenFOAM-iterations.log =========="
+cat precice-OpenFOAM-iterations.log
+
+echo ""
+echo "========== 4. precice-OpenMC-iterations.log =========="
+cat precice-OpenMC-iterations.log
+
+echo ""
+echo "========== 5. validation_env/openmc.log =========="
+cat validation_env/openmc.log
+
+echo ""
+echo "========== 6. validation_env/openfoam.log =========="
+cat validation_env/openfoam.log
+========== 1. openmc.log 完整日志 ==========
+(0) 17:28:03 [impl::ParticipantImpl]:185 in configure: This is preCICE version 3.4.0
+(0) 17:28:03 [impl::ParticipantImpl]:186 in configure: Revision info: no-info [git failed to run]
+(0) 17:28:03 [impl::ParticipantImpl]:205 in configure: Build type: Release (without debug log)
+(0) 17:28:03 [impl::ParticipantImpl]:207 in configure: Working directory "/home/tb-xingliwei/nuclear-engine"
+(0) 17:28:03 [impl::ParticipantImpl]:211 in configure: Configuring preCICE with configuration "config_unified.xml"
+(0) 17:28:03 [impl::ParticipantImpl]:212 in configure: I am participant "OpenMC"
+(0) 17:28:13 [impl::ParticipantImpl]:335 in setupCommunication: Setting up primary communication to coupling partner/s
+(0) 17:28:13 [impl::ParticipantImpl]:351 in setupCommunication: Primary ranks are connected
+(0) 17:28:14 [impl::ParticipantImpl]:357 in setupCommunication: Setting up preliminary secondary communication to coupling partner/s
+(0) 17:28:14 [partition::ProvidedPartition]:120 in prepare: Prepare partition for mesh MeshOne
+(0) 17:28:19 [partition::ProvidedPartition]:87 in communicate: Gather mesh MeshOne
+(0) 17:28:19 [partition::ProvidedPartition]:104 in communicate: Send global mesh MeshOne
+(0) 17:28:20 [impl::ParticipantImpl]:366 in setupCommunication: Setting up secondary communication to coupling partner/s
+(0) 17:28:20 [impl::ParticipantImpl]:373 in setupCommunication: Secondary ranks are connected
+(0) 17:28:21 [impl::ParticipantImpl]:298 in initialize: it 1 (min: 1, max: 10), time-window 1, t 0 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:28:40 [impl::ParticipantImpl]:457 in advance: it 2 (min: 1, max: 10), time-window 1, t 0 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:29:01 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 17:29:01 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 2, t 0.01 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:29:20 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 17:29:20 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 3, t 0.02 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:29:39 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 17:29:39 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 4, t 0.03 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:29:57 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 17:29:57 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 5, t 0.04 (max: 1), Dt 0.01, max-dt 0.01
+(0) 17:29:57 [impl::ParticipantImpl]:1832 in closeCommunicationChannels: Close communication channels
+[OpenMC] 500³ 优化版启动...
+OpenMC: 64,000,000 点
+生成网格...
+顶点: 768.0 MB
+dt=0.01
+  [OpenMC] 写入检查点
+步 1: T=300.0K
+步 2: T=300.0K
+  [OpenMC] 读取检查点
+  [OpenMC] 写入检查点
+步 3: T=300.0K
+  [OpenMC] 写入检查点
+步 4: T=300.0K
+  [OpenMC] 写入检查点
+步 5: T=300.0K
+OpenMC 完成
+温度场和功率场已保存
+
+========== 2. precice-OpenFOAM-convergence.log ==========
+  TimeWindow  Iteration  ResRel(MeshOne:Power)
+     1       1   1.00000000e+00
+     1       2   0.00000000e+00
+     2       1   0.00000000e+00
+     3       1   0.00000000e+00
+     4       1   0.00000000e+00
+========== 3. precice-OpenFOAM-iterations.log ==========
+  TimeWindow  TotalIterations  Iterations  Convergence
+     1       2       2       1
+     2       3       1       1
+     3       4       1       1
+========== 4. precice-OpenMC-iterations.log ==========
+  TimeWindow  TotalIterations  Iterations  Convergence
+     1       2       2       1
+     2       3       1       1
+     3       4       1       1
+     4       5       1       1
+========== 5. validation_env/openmc.log ==========
+(0) 19:14:39 [impl::ParticipantImpl]:185 in configure: This is preCICE version 3.4.0
+(0) 19:14:39 [impl::ParticipantImpl]:186 in configure: Revision info: no-info [git failed to run]
+(0) 19:14:39 [impl::ParticipantImpl]:205 in configure: Build type: Release (without debug log)
+(0) 19:14:39 [impl::ParticipantImpl]:207 in configure: Working directory "/media/tb-xingliwei/PDE/nuclear-engine"
+(0) 19:14:39 [impl::ParticipantImpl]:211 in configure: Configuring preCICE with configuration "config_unified.xml"
+(0) 19:14:39 [impl::ParticipantImpl]:212 in configure: I am participant "OpenMC"
+(0) 19:14:49 [impl::ParticipantImpl]:335 in setupCommunication: Setting up primary communication to coupling partner/s
+(0) 19:14:49 [impl::ParticipantImpl]:351 in setupCommunication: Primary ranks are connected
+(0) 19:14:50 [impl::ParticipantImpl]:357 in setupCommunication: Setting up preliminary secondary communication to coupling partner/s
+(0) 19:14:50 [partition::ProvidedPartition]:120 in prepare: Prepare partition for mesh MeshOne
+(0) 19:14:54 [partition::ProvidedPartition]:87 in communicate: Gather mesh MeshOne
+(0) 19:14:54 [partition::ProvidedPartition]:104 in communicate: Send global mesh MeshOne
+(0) 19:14:56 [impl::ParticipantImpl]:366 in setupCommunication: Setting up secondary communication to coupling partner/s
+(0) 19:14:56 [impl::ParticipantImpl]:373 in setupCommunication: Secondary ranks are connected
+(0) 19:14:56 [impl::ParticipantImpl]:298 in initialize: it 1 (min: 1, max: 10), time-window 1, t 0 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:15:15 [impl::ParticipantImpl]:457 in advance: it 2 (min: 1, max: 10), time-window 1, t 0 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:15:33 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 19:15:33 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 2, t 0.01 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:15:51 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 19:15:51 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 3, t 0.02 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:16:08 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 19:16:08 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 4, t 0.03 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:16:25 [cplscheme::BaseCouplingScheme]:391 in secondExchange: Time window completed
+(0) 19:16:25 [impl::ParticipantImpl]:457 in advance: it 1 (min: 1, max: 10), time-window 5, t 0.04 (max: 1), Dt 0.01, max-dt 0.01
+(0) 19:16:25 [impl::ParticipantImpl]:1832 in closeCommunicationChannels: Close communication channels
+[OpenMC] 500³ 优化版启动...
+OpenMC: 59,319,000 点
+生成网格...
+顶点: 711.8 MB
+dt=0.01
+  [OpenMC] 写入检查点
+步 1: T=300.0K
+步 2: T=300.0K
+  [OpenMC] 读取检查点
+  [OpenMC] 写入检查点
+步 3: T=300.0K
+  [OpenMC] 写入检查点
+步 4: T=300.0K
+  [OpenMC] 写入检查点
+步 5: T=300.0K
+OpenMC 完成
+
+========== 6. validation_env/openfoam.log ==========
+(0) 06:52:45 [impl::ParticipantImpl]:185 in configure: This is preCICE version 3.3.1
+(0) 06:52:45 [impl::ParticipantImpl]:186 in configure: Revision info: no-info [git failed to run]
+(0) 06:52:45 [impl::ParticipantImpl]:205 in configure: Build type: Release (without debug log)
+(0) 06:52:45 [impl::ParticipantImpl]:207 in configure: Working directory "/media/tb-xingliwei/PDE/nuclear-engine"
+(0) 06:52:45 [impl::ParticipantImpl]:211 in configure: Configuring preCICE with configuration "config_unified.xml"
+(0) 06:52:45 [impl::ParticipantImpl]:212 in configure: I am participant "OpenFOAM"
+(0) 06:52:45 [impl::ParticipantImpl]:335 in setupCommunication: Setting up primary communication to coupling partner/s
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /home/tb-xingliwei/nuclear-engine-core && echo "========== run_coupling.sh ==========" && cat run_coupling.sh && echo "" && echo "========== plot_results.py ==========" && cat plot_results.py
+
+
+
+
+
+
+
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ cd /home/tb-xingliwei/nuclear-engine-core && echo "========== run_coupling.sh ==========" && cat run_coupling.sh && echo "" && echo "========== plot_results.py ==========" && cat plot_results.py
+========== run_coupling.sh ==========
+#!/bin/bash
+# 清理上一次运行的残留文件
+rm -rf precice-run
+# 启动 OpenMC（后台运行）
+python3 openmc_final.py > openmc.log 2>&1 &
+# 启动 OpenFOAM（前台运行，会显示输出）
+python3 openfoam_final.py
+
+========== plot_results.py ==========
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 加载数据
+temp = np.load('temp_field.npy')
+power = np.load('power_field.npy')
+
+# 简单绘图（例如，显示温度场的中心切片）
+size = int(round(temp.shape[0] ** (1/3)))  # 假设是立方体网格
+temp_3d = temp.reshape((size, size, size))
+
+plt.figure(figsize=(10, 4))
+plt.subplot(1,2,1)
+plt.imshow(temp_3d[:, :, size//2], origin='lower')
+plt.colorbar(label='Temperature (K)')
+plt.title('Temperature Field (Middle Slice)')
+
+plt.subplot(1,2,2)
+# 可类似地绘制功率场
+# ...
+plt.show()
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ 
+
+
+
+
+cd /home/tb-xingliwei/nuclear-engine-core
+ls -lh temp_field.npy power_field.npy
+file temp_field.npy
+file power_field.npy
+
+
+
+
+
+
+
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ cd /home/tb-xingliwei/nuclear-engine-core
+ls -lh temp_field.npy power_field.npy
+file temp_field.npy
+file power_field.npy
+-rw-rw-r-- 1 tb-xingliwei tb-xingliwei 245M Apr  4 18:22 power_field.npy
+-rw-rw-r-- 1 tb-xingliwei tb-xingliwei 489M Apr  4 18:22 temp_field.npy
+temp_field.npy: NumPy data file, version 1.0, description {'descr': '<f8', 'fortran_order': False, 'shape': (64000000,), }                                                     
+power_field.npy: NumPy data file, version 1.0, description {'descr': '<f4', 'fortran_order': False, 'shape': (64000000,), }                                                     
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+python3 -c "
+import numpy as np
+temp = np.load('temp_field.npy')
+power = np.load('power_field.npy')
+print('=== 温度场 (temp_field.npy) ===')
+print(f'形状: {temp.shape}')
+print(f'数据类型: {temp.dtype}')
+print(f'大小: {temp.nbytes / 1e6:.1f} MB')
+print(f'最小值: {temp.min():.2f}')
+print(f'最大值: {temp.max():.2f}')
+print(f'平均值: {temp.mean():.2f}')
+print(f'标准差: {temp.std():.2f}')
+print()
+print('=== 功率场 (power_field.npy) ===')
+print(f'形状: {power.shape}')
+print(f'数据类型: {power.dtype}')
+print(f'大小: {power.nbytes / 1e6:.1f} MB')
+print(f'最小值: {power.min():.2e}')
+print(f'最大值: {power.max():.2e}')
+print(f'平均值: {power.mean():.2e}')
+print(f'标准差: {power.std():.2e}')
+"
+
+
+
+
+
+
+
+
+
+
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ python3 -c "
+import numpy as np
+temp = np.load('temp_field.npy')
+power = np.load('power_field.npy')
+print('=== 温度场 (temp_field.npy) ===')
+print(f'形状: {temp.shape}')
+print(f'数据类型: {temp.dtype}')
+print(f'大小: {temp.nbytes / 1e6:.1f} MB')
+print(f'最小值: {temp.min():.2f}')
+print(f'最大值: {temp.max():.2f}')
+print(f'平均值: {temp.mean():.2f}')
+print(f'标准差: {temp.std():.2f}')
+print()
+print('=== 功率场 (power_field.npy) ===')
+print(f'形状: {power.shape}')
+print(f'数据类型: {power.dtype}')
+print(f'大小: {power.nbytes / 1e6:.1f} MB')
+print(f'最小值: {power.min():.2e}')
+print(f'最大值: {power.max():.2e}')
+print(f'平均值: {power.mean():.2e}')
+print(f'标准差: {power.std():.2e}')
+"
+=== 温度场 (temp_field.npy) ===
+形状: (64000000,)
+数据类型: float64
+大小: 512.0 MB
+最小值: 300.00
+最大值: 300.00
+平均值: 300.00
+标准差: 0.00
+
+=== 功率场 (power_field.npy) ===
+形状: (64000000,)
+数据类型: float32
+大小: 256.0 MB
+最小值: 1.00e+03
+最大值: 1.00e+03
+平均值: 1.00e+03
+标准差: 0.00e+00
+tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
