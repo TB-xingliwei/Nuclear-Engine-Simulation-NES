@@ -775,6 +775,35 @@ tb-xingliwei@tb-xingliwei:~/nuclear-engine-core$
 
 
 
+# 核发动机仿真（NES）- 开源多物理场耦合
+
+**400³ 网格 | OpenMC ↔ OpenFOAM ↔ CalculiX | preCICE | 28GB 内存**
+
+## 这是什么
+基于开源工具链的核发动机多物理场耦合仿真：
+- 中子物理（OpenMC）
+- 热工水力（OpenFOAM）
+- 固体力学（CalculiX）
+
+## 验证结果
+
+| 规模 | 点数 | 内存 | 状态 |
+|------|------|------|------|
+| 300³ | 27M | ~15GB | ✅ |
+| 350³ | 43M | ~20GB | ✅ |
+| 380³ | 55M | ~25GB | ✅ |
+| 390³ | 60M | ~28GB | ✅ |
+| 400³ | 64M | ~30GB | ✅ |
+
+**稳定上限：400³（6400万点），HP Z99 32GB**
+
+## 结果示例
+![温度场](Figure_1.png)
+
+## 运行
+```bash
+./run_coupling.sh
+
 
 
 
